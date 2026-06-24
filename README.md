@@ -74,8 +74,8 @@ cd Projeto_Final_PPD
 python client.py
 ```
 
-Cada comando abre uma janela gráfica independente. Entre com nomes diferentes, como `alice`
-e `bob`. Também é possível usar `python client.py --name alice`.
+Cada comando abre uma janela gráfica independente. Cada cliente deve digitar seu próprio nome
+na tela de entrada antes de acessar o sistema.
 
 Para encerrar e preservar as filas:
 

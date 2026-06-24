@@ -140,7 +140,7 @@ class ChatApp:
     BLUE, GREEN, GRAY, RED = "#2563eb", "#16a34a", "#64748b", "#dc2626"
     BORDER, MUTED = "#d8e1eb", "#6b7c93"
 
-    def __init__(self, root: tk.Tk, host: str, port: int, initial_name: str = ""):
+    def __init__(self, root: tk.Tk, host: str, port: int):
         self.root, self.host, self.port = root, host, port
         self.events: queue.Queue = queue.Queue()
         self.network = NetworkClient(host, port, self.events)
@@ -153,7 +153,7 @@ class ChatApp:
         self.root.configure(bg=self.BG)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self._configure_style()
-        self._login(initial_name)
+        self._login()
         self.root.after(80, self._poll_events)
 
     def _configure_style(self) -> None:
@@ -167,7 +167,7 @@ class ChatApp:
                   background=[("selected", self.BLUE)],
                   foreground=[("selected", "white")])
 
-    def _login(self, initial_name: str) -> None:
+    def _login(self) -> None:
         frame = tk.Frame(self.root, bg=self.PANEL, padx=45, pady=38,
                          highlightthickness=1, highlightbackground="#d8e0ea")
         frame.place(relx=.5, rely=.5, anchor="center")
@@ -178,7 +178,6 @@ class ChatApp:
         tk.Label(frame, text="Nome de contato", bg=self.PANEL, fg="#263238").pack(anchor="w")
         self.name_entry = tk.Entry(frame, width=32, font=("Segoe UI", 11), relief="solid", bd=1)
         self.name_entry.pack(ipady=6, pady=(5, 12))
-        self.name_entry.insert(0, initial_name)
         self.name_entry.bind("<Return>", lambda _e: self._enter(frame))
         tk.Button(frame, text="Entrar", command=lambda: self._enter(frame), bg=self.BLUE,
                   fg="white", activebackground=self.NAVY, activeforeground="white",
@@ -463,10 +462,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Cliente gráfico do Mensageiro PPD")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5050)
-    parser.add_argument("--name", default="")
     args = parser.parse_args()
     root = tk.Tk()
-    ChatApp(root, args.host, args.port, args.name)
+    ChatApp(root, args.host, args.port)
     root.mainloop()
 
 
