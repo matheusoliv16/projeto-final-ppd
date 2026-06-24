@@ -27,21 +27,42 @@ class NetworkClient:
         self.username = ""
         self.online = False
 
-    def connect(self, username: str) -> None:
+    def connect(self, username: str, contacts: list[str]) -> None:
         if self.online:
             return
         sock = socket.create_connection((self.host, self.port), timeout=5)
-        sock.settimeout(None)
         self.connection = JsonConnection(sock)
         self.username = username
-        self.connection.send({"action": "register", "username": username})
-        threading.Thread(target=self._receive, daemon=True, name="receptor-chat").start()
-
-    def _receive(self) -> None:
+        self.connection.send({
+            "action": "register",
+            "username": username,
+            "contacts": contacts,
+        })
+        stream = self.connection.messages()
         try:
-            for event in self.connection.messages():
-                if event.get("event") == "registered":
-                    self.online = True
+            first_event = next(stream)
+        except StopIteration as exc:
+            self.connection.close()
+            self.connection = None
+            raise ConnectionError("O servidor encerrou a conexão durante o login.") from exc
+        if first_event.get("event") != "registered":
+            message = first_event.get("message", "Não foi possível entrar no sistema.")
+            self.connection.close()
+            self.connection = None
+            raise ValueError(message)
+        sock.settimeout(None)
+        self.online = True
+        self.events.put(first_event)
+        threading.Thread(
+            target=self._receive,
+            args=(stream,),
+            daemon=True,
+            name="receptor-chat",
+        ).start()
+
+    def _receive(self, stream) -> None:
+        try:
+            for event in stream:
                 self.events.put(event)
         except (OSError, ValueError, json.JSONDecodeError):
             pass
@@ -50,11 +71,21 @@ class NetworkClient:
             self.online = False
             self.events.put({"event": "disconnected", "unexpected": was_online})
 
-    def send(self, recipient: str, text: str, client_id: str) -> None:
+    def send(self, recipient: str, text: str, client_id: str,
+             offline_origin: bool = False) -> None:
         if not self.online or not self.connection:
             raise ConnectionError("Cliente offline")
-        self.connection.send({"action": "send", "to": recipient,
-                              "text": text, "client_id": client_id})
+        self.connection.send({
+            "action": "send",
+            "to": recipient,
+            "text": text,
+            "client_id": client_id,
+            "offline_origin": offline_origin,
+        })
+
+    def sync_contacts(self, contacts: list[str]) -> None:
+        if self.online and self.connection:
+            self.connection.send({"action": "update_contacts", "contacts": contacts})
 
     def ask_status(self, contact: str) -> None:
         if self.online and self.connection:
@@ -161,7 +192,10 @@ class ChatApp:
             return
         self.profile = Profile(name)
         try:
-            self.network.connect(name)
+            self.network.connect(name, self.profile.contacts)
+        except ValueError as exc:
+            messagebox.showwarning("Nome indisponível", str(exc))
+            return
         except OSError as exc:
             messagebox.showerror("Servidor indisponível", f"Não foi possível conectar:\n{exc}")
             return
@@ -268,9 +302,9 @@ class ChatApp:
             self._set_state(False)
         else:
             try:
-                self.network.connect(self.profile.username)
+                self.network.connect(self.profile.username, self.profile.contacts)
                 self.state_button.config(text="Conectando...", bg=self.GRAY)
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
                 messagebox.showerror("Falha de conexão", str(exc))
 
     def _set_state(self, online: bool) -> None:
@@ -289,6 +323,7 @@ class ChatApp:
             return
         self.profile.contacts.append(name)
         self.profile.save(); self.contact_entry.delete(0, "end")
+        self.network.sync_contacts(self.profile.contacts)
         self.network.ask_status(name); self._refresh_contacts()
 
     def _remove_contact(self) -> None:
@@ -298,6 +333,7 @@ class ChatApp:
         name = selection[0]
         if messagebox.askyesno("Remover contato", f"Remover {name} da lista?\nO histórico será preservado."):
             self.profile.contacts.remove(name); self.profile.save()
+            self.network.sync_contacts(self.profile.contacts)
             if self.selected == name:
                 self.selected = None; self._render_history()
             self._refresh_contacts()
@@ -372,7 +408,9 @@ class ChatApp:
     def _flush_outbox(self) -> None:
         for msg in list(self.profile.outbox):
             try:
-                self.network.send(msg["to"], msg["text"], msg["client_id"])
+                self.network.send(
+                    msg["to"], msg["text"], msg["client_id"], offline_origin=True
+                )
             except OSError:
                 break
 
@@ -395,8 +433,6 @@ class ChatApp:
         elif kind == "message":
             msg = event["message"]; other = msg["from"]
             self.profile.add_message(other, msg)
-            if other not in self.profile.contacts:
-                self.profile.contacts.append(other); self.profile.save(); self._refresh_contacts()
             if self.selected == other:
                 self._render_history()
         elif kind == "sent":

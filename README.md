@@ -123,6 +123,18 @@ Quando o destinatário se conecta novamente, o servidor consome suas mensagens e
 confirmação `ACK` somente depois da entrega pelo socket. Se a conexão falhar antes da
 confirmação, o RabbitMQ mantém ou reenfileira a mensagem.
 
+Se o próprio remetente escrever enquanto estiver offline, a mensagem permanece temporariamente
+na caixa de saída local, pois não existe conexão com o servidor remoto. Na reconexão, ela é
+marcada como originada offline e encaminhada obrigatoriamente pelo RabbitMQ, inclusive quando
+o destinatário já estiver online.
+
+## Lista de contatos
+
+O cliente envia sua lista de contatos ao registrar-se e sempre que ela é alterada. O servidor
+valida cada envio e rejeita destinatários que não estejam nessa lista. Receber uma mensagem não
+adiciona automaticamente o remetente aos contatos; inclusão e exclusão são ações explícitas na
+interface.
+
 ## Testes
 
 Teste rápido da lógica, sem infraestrutura externa:

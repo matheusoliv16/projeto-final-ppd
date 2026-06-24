@@ -17,11 +17,13 @@ class PresenceRegistry:
         self.clients: dict[str, JsonConnection] = {}
         self.lock = threading.RLock()
 
-    def register(self, name: str, conn: JsonConnection) -> JsonConnection | None:
+    def register(self, name: str, conn: JsonConnection) -> bool:
+        """Reserva um nome sem substituir uma sessão que já está ativa."""
         with self.lock:
-            previous = self.clients.get(name)
+            if name in self.clients and self.clients[name] is not conn:
+                return False
             self.clients[name] = conn
-            return previous
+            return True
 
     def unregister(self, name: str, conn: JsonConnection) -> bool:
         with self.lock:
@@ -51,18 +53,27 @@ class PresenceRegistry:
 
 class ChatHandler(socketserver.BaseRequestHandler):
     username: str | None = None
+    contacts: set[str]
 
     def handle(self) -> None:
         self.conn = JsonConnection(self.request)
+        self.contacts = set()
         try:
             for command in self.conn.messages():
                 action = command.get("action")
                 if action == "register":
-                    self._register(str(command.get("username", "")).strip())
+                    self._register(
+                        str(command.get("username", "")).strip(),
+                        command.get("contacts", []),
+                    )
                 elif not self.username:
                     self.conn.send({"event": "error", "message": "Registre-se primeiro"})
                 elif action == "send":
                     self._send(command)
+                elif action == "update_contacts":
+                    self.contacts = self._valid_contacts(command.get("contacts", []))
+                    self.contacts.discard(self.username)
+                    self.conn.send({"event": "contacts_updated"})
                 elif action == "status":
                     contact = str(command.get("contact", ""))
                     self.conn.send({"event": "presence", "contact": contact,
@@ -81,10 +92,27 @@ class ChatHandler(socketserver.BaseRequestHandler):
                     except_name=self.username,
                 )
 
-    def _register(self, username: str) -> None:
+    @staticmethod
+    def _valid_contacts(raw) -> set[str]:
+        if not isinstance(raw, list):
+            return set()
+        return {
+            str(name).strip() for name in raw
+            if str(name).strip() and len(str(name).strip()) <= 30
+        }
+
+    def _register(self, username: str, contacts) -> None:
         if not username or len(username) > 30:
             self.conn.send({"event": "error", "message": "Nome inválido"})
             return
+        if self.server.registry.get(username) is not None:
+            self.conn.send({
+                "event": "login_rejected",
+                "message": "Esse nome já está em uso.",
+            })
+            return
+        self.contacts = self._valid_contacts(contacts)
+        self.contacts.discard(username)
         try:
             self.server.broker.declare_queue(username)
         except Exception as exc:
@@ -93,13 +121,13 @@ class ChatHandler(socketserver.BaseRequestHandler):
                 "message": f"Broker RabbitMQ indisponível: {exc}",
             })
             return
-        previous = self.server.registry.register(username, self.conn)
-        if previous and previous is not self.conn:
-            try:
-                previous.send({"event": "error", "message": "Contato conectado em outra janela"})
-                previous.close()
-            except OSError:
-                pass
+        # A segunda verificação é atômica e cobre dois logins simultâneos.
+        if not self.server.registry.register(username, self.conn):
+            self.conn.send({
+                "event": "login_rejected",
+                "message": "Esse nome já está em uso.",
+            })
+            return
         self.username = username
         online = self.server.registry.names()
         self.conn.send({"event": "registered", "username": username, "online": online})
@@ -117,22 +145,31 @@ class ChatHandler(socketserver.BaseRequestHandler):
         recipient = str(command.get("to", "")).strip()
         text = str(command.get("text", "")).strip()
         client_id = str(command.get("client_id", ""))
+        offline_origin = command.get("offline_origin") is True
         if not recipient or not text or len(text) > 2000:
             self.conn.send({"event": "error", "message": "Destinatário ou texto inválido"})
+            return
+        if recipient not in self.contacts:
+            self.conn.send({
+                "event": "error",
+                "client_id": client_id,
+                "message": "Só é permitido enviar mensagens para amigos adicionados.",
+            })
             return
         message = {
             "id": str(uuid4()), "client_id": client_id, "from": self.username,
             "to": recipient, "text": text,
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "offline_origin": offline_origin,
         }
         destination = self.server.registry.get(recipient)
         mode = "online"
-        if destination:
+        if destination and not offline_origin:
             try:
                 destination.send({"event": "message", "message": message})
             except OSError:
                 destination = None
-        if not destination:
+        if not destination or offline_origin:
             try:
                 self.server.broker.publish(recipient, message)
             except Exception as exc:
@@ -142,6 +179,13 @@ class ChatHandler(socketserver.BaseRequestHandler):
                 })
                 return
             mode = "offline_queue"
+            if destination:
+                try:
+                    for pending in self.server.broker.consume(recipient):
+                        pending["delivery"] = "offline_queue"
+                        destination.send({"event": "message", "message": pending})
+                except OSError:
+                    pass
         self.conn.send({"event": "sent", "client_id": client_id, "message": message, "mode": mode})
         print(f"[CHAT] {self.username} -> {recipient} ({mode})")
 
